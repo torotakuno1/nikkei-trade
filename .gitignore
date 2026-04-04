@@ -1,0 +1,23 @@
+# Data files (too large for git)
+*.csv
+*.xlsx
+*.parquet
+data/*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log

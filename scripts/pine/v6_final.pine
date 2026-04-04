@@ -1,0 +1,177 @@
+//@version=5
+strategy("NIKKEI v6 Final (v5+DMA傾きフィルター)", 
+     overlay=true,
+     initial_capital=920000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=2,
+     currency=currency.JPY,
+     commission_type=strategy.commission.cash_per_order,
+     commission_value=50,
+     slippage=1,
+     pyramiding=0,
+     calc_on_every_tick=false)
+
+// ============================================================
+// v6パラメータ
+// ============================================================
+i_minScore    = 2
+i_macdFast    = 12
+i_macdSlow    = 26
+i_macdSignal  = 9
+i_rsiLen      = 14
+i_diLen       = 14
+i_adxSmooth   = 20
+i_adxThresh   = 20
+i_kvoFast     = 34
+i_kvoSlow     = 55
+i_stdLen      = 26
+i_bbLen       = 21
+i_bbSigma     = 0.6
+i_dmaLen      = 20
+i_stopLoss    = 300
+i_slopeThresh = 0.05  // DMA傾き閾値（%）
+
+// ============================================================
+// LDN16除外
+// ============================================================
+hourLDN = hour(time, "Europe/London")
+sessionOK = hourLDN != 16
+
+// ============================================================
+// SQ週回避
+// ============================================================
+isFriday = dayofweek == dayofweek.friday
+dom = dayofmonth
+isSQFriday = isFriday and dom >= 8 and dom <= 14
+var int sqFridayDOM = 0
+if isSQFriday
+    sqFridayDOM := dom
+isSQWeek = dom >= (sqFridayDOM - 4) and dom <= sqFridayDOM and sqFridayDOM >= 8 and sqFridayDOM <= 14 and month == month[1]
+sqOK = not isSQWeek
+
+// ============================================================
+// 日足トレンドフィルター + DMA傾きフィルター（v6）
+// ============================================================
+dma_d = request.security(syminfo.tickerid, "D", ta.sma(close, i_dmaLen))
+dmaRising_d  = request.security(syminfo.tickerid, "D", ta.sma(close, i_dmaLen) > ta.sma(close, i_dmaLen)[1])
+dmaFalling_d = request.security(syminfo.tickerid, "D", ta.sma(close, i_dmaLen) < ta.sma(close, i_dmaLen)[1])
+dmaSlope = request.security(syminfo.tickerid, "D", (ta.sma(close, i_dmaLen) - ta.sma(close, i_dmaLen)[1]) / ta.sma(close, i_dmaLen)[1] * 100)
+
+// S3: 傾き小のとき L+S 両方停止
+slopeLongOK  = math.abs(dmaSlope) > i_slopeThresh or not dmaRising_d
+slopeShortOK = math.abs(dmaSlope) > i_slopeThresh or not dmaFalling_d
+
+// ============================================================
+// 平均足
+// ============================================================
+haClose = (open + high + low + close) / 4
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+haBullish = haClose > haOpen
+haBearish = haClose < haOpen
+
+// ============================================================
+// NTインジケーター
+// ============================================================
+[macdLine, signalLine, macdHist] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSignal)
+rsiVal = ta.rsi(close, i_rsiLen)
+[diPlus, diMinus, adxVal] = ta.dmi(i_diLen, i_adxSmooth)
+
+kvo_trend = ta.change(hlc3) > 0 ? volume : -volume
+kvo_fast  = ta.ema(kvo_trend, i_kvoFast)
+kvo_slow  = ta.ema(kvo_trend, i_kvoSlow)
+kvo       = kvo_fast - kvo_slow
+
+sig_macd = macdHist > 0 ? 1 : macdHist < 0 ? -1 : 0
+sig_rsi  = rsiVal > 50 ? 1 : rsiVal < 50 ? -1 : 0
+sig_di   = diPlus > diMinus ? 1 : diPlus < diMinus ? -1 : 0
+sig_kvo  = kvo > 0 ? 1 : kvo < 0 ? -1 : 0
+
+scoreLong  = (sig_macd == 1 ? 1 : 0) + (sig_rsi == 1 ? 1 : 0) + (sig_di == 1 ? 1 : 0) + (sig_kvo == 1 ? 1 : 0)
+scoreShort = (sig_macd == -1 ? 1 : 0) + (sig_rsi == -1 ? 1 : 0) + (sig_di == -1 ? 1 : 0) + (sig_kvo == -1 ? 1 : 0)
+
+anyCrossUp = ta.crossover(macdHist, 0) or ta.crossover(rsiVal, 50) or ta.crossover(diPlus, diMinus) or ta.crossover(kvo, 0)
+anyCrossDn = ta.crossunder(macdHist, 0) or ta.crossunder(rsiVal, 50) or ta.crossunder(diPlus, diMinus) or ta.crossunder(kvo, 0)
+
+adxFilter = adxVal > i_adxThresh
+
+ntLong  = scoreLong >= i_minScore and anyCrossUp and haBullish and adxFilter
+ntShort = scoreShort >= i_minScore and anyCrossDn and haBearish and adxFilter
+
+// ============================================================
+// VM
+// ============================================================
+stdDev    = ta.stdev(close, i_stdLen)
+stdRising = stdDev > stdDev[1]
+adxRising = adxVal > adxVal[1]
+trendActive = stdRising and adxRising
+
+bbBasis = ta.sma(close, i_bbLen)
+bbDev   = i_bbSigma * ta.stdev(close, i_bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+var int vmDir = 0
+if trendActive and close > bbUpper and vmDir != 1
+    vmDir := 1
+if trendActive and close < bbLower and vmDir != -1
+    vmDir := -1
+if vmDir == 1 and close < bbUpper
+    vmDir := 0
+if vmDir == -1 and close > bbLower
+    vmDir := 0
+
+vmBull = vmDir == 1
+vmBear = vmDir == -1
+
+// ============================================================
+// MTF
+// ============================================================
+mtfEma      = request.security(syminfo.tickerid, "60", ta.ema(close, 20))
+[_, _, mtfMacdHist] = request.security(syminfo.tickerid, "60", ta.macd(close, 12, 26, 9))
+mtfClose    = request.security(syminfo.tickerid, "60", close)
+
+mtfBullish = mtfClose > mtfEma and mtfMacdHist > 0
+mtfBearish = mtfClose < mtfEma and mtfMacdHist < 0
+
+// ============================================================
+// 統合エントリー（v6）
+// ============================================================
+longEntry  = ntLong and vmBull and mtfBullish and dmaRising_d and sessionOK and sqOK and slopeLongOK
+shortEntry = ntShort and vmBear and mtfBearish and dmaFalling_d and sessionOK and sqOK and slopeShortOK
+
+// ============================================================
+// 執行
+// ============================================================
+if longEntry and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long SL", "Long", stop=close - i_stopLoss)
+
+if shortEntry and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short SL", "Short", stop=close + i_stopLoss)
+
+if strategy.position_size > 0 and ntShort
+    strategy.close("Long", comment="NT反転")
+if strategy.position_size < 0 and ntLong
+    strategy.close("Short", comment="NT反転")
+
+// ============================================================
+// 描画
+// ============================================================
+bgcolor(vmBull ? color.new(color.green, 85) : vmBear ? color.new(color.red, 85) : na)
+plot(dma_d, "D20 MA", color.new(color.yellow, 30), linewidth=2)
+
+plotshape(longEntry and strategy.position_size <= 0, "Long", shape.arrowup, location.belowbar, color.lime, size=size.tiny)
+plotshape(shortEntry and strategy.position_size >= 0, "Short", shape.arrowdown, location.abovebar, color.red, size=size.tiny)
+
+var table t = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80))
+if barstate.islast
+    table.cell(t, 0, 0, "v6 Final", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, "DMA傾き", text_color=color.orange, text_size=size.small)
+    table.cell(t, 0, 1, "傾き", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(dmaSlope, "#.###") + "%", text_color=math.abs(dmaSlope) > i_slopeThresh ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 2, "閾値", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(i_slopeThresh) + "%", text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 3, "slopeOK", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 3, (slopeLongOK and slopeShortOK) ? "✓" : "✗", text_color=(slopeLongOK and slopeShortOK) ? color.green : color.red, text_size=size.small)
