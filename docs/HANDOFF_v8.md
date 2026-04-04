@@ -86,9 +86,9 @@ VT20% Max5 IDM=1.2 慣性10%
 
 ## 口座・商品
 
-口座: IBKR Japan U14203671 | 純資産200万予定(現約92万)
+口座: IBKR Japan UXXXXXXXX | 純資産200万予定(現約92万)
 N225MC: OSE:NK225MC1! ×10, 1ティック5円=50円, 証拠金~2.5-3万/枚
-IB Gateway: port 4001 | Tailscale: 100.97.76.83
+IB Gateway: port 4001 | Tailscale: xxx.xxx.xxx.xxx
 Gold MGC: IBKR Japanでの取引可否要確認
 
 ---
