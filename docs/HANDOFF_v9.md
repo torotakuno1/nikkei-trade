@@ -1,4 +1,4 @@
-# NIKKEI TRADE 統合システム - 引き継ぎ v8
+# NIKKEI TRADE 統合システム - 引き継ぎ v9
 
 ## ⚠️ Claude運用ルール
 
@@ -12,6 +12,7 @@
 本ファイル = 意思決定・結論・教訓のみ。コード・詳細データは別ファイル参照。
 - scripts/pine/ → v6, 案C Pine Script
 - scripts/signal_engine/ → v6 Python移植版, gold_ewmac.py
+- scripts/execution/ → v6, 案C, Gold EWMAC リアルタイムエンジン（稼働中）
 - research/ → macro_analysis_results.md, academic_validation_JP.md
 - data/README.md → データファイル所在
 
@@ -41,7 +42,7 @@ NP 1,403.2万 | DD 85.9万(43.0%) | RF 16.33 | 全年+ | DD分散34%軽減
 
 シグナル: EWMAC barbell(8,32)+(64,256) ロングのみ
 フィルター: GVZ zscore > 0
-VT20% Max5, IDM=1.2, 慣性10% | 商品: MGC or GC
+VT20% Max5, IDM=1.2, 慣性10% | 商品: MGC (COMEX, IBKR Japan取引可 確認済み)
 
 成績(2019/1-2026/4, 7年超): NP 977.8万 | DD 57.1万(28.6%) | RF 17.14 | Active 42%
 
@@ -53,7 +54,7 @@ VT20% Max5, IDM=1.2, 慣性10% | 商品: MGC or GC
 
 - **v6**: VT20 Max5 DDなし（VTがDD期ボラ拡大で自動縮小→DDステップダウン冗長）
 - **案C**: VT1+DD固定2枚（DD -30%, RF +34%）
-- **Gold EWMAC**: VT20% Max5 DDなし（v6と同じ結論）
+- **Gold EWMAC**: VT20% Max2（300万口座、IDM=1.2、慣性10%）
 
 ---
 
@@ -76,9 +77,7 @@ GVZ_z>0 採用理由: WF合格(IS 8.08→OOS 10.13) / 台地-0.5〜+1.0 / Active
 | 2025 | +266.9 | 7.20 | +262.7 | 6.86 | 45 | ▼微 |
 | 2026 | +112.8 | 4.13 | +92.5 | 3.97 | 63 | ▼微 |
 
-- 全8年プラス（BL 6/8）、LOYO全8年✓、BL赤字年→プラス転換(2019,2021)
-- 月次: GVZ_z>0月 勝率71%/+18.3万, GVZ_z≤0月 勝率31%/-0.4万, 相関+0.477
-- DD: BL 99.8万(18ヶ月) → GVZ 57.1万(5ヶ月)
+全8年プラス（BL 6/8）、LOYO全8年✓、BL赤字年→プラス転換(2019,2021)
 
 効かないもの: DMA傾き, VIXターム構造, ADX閾値, ボラフィルター, SQ除外, 時間帯除外, 代替シグナル(Breakout/ROC/RSI/MACD)
 
@@ -90,14 +89,20 @@ GVZ_z>0 採用理由: WF合格(IS 8.08→OOS 10.13) / 台地-0.5〜+1.0 / Active
 
 **v6/案C: マクロフィルター追加なし**（教訓#29: 改善主軸はポジションサイジング層）
 
-**商品間非対称性:** GVZ→Gold専用, VIXレベル→N225専用, 同指標が逆方向に効く
+**N225追加フィルター分析（2026/4/5, 全て見送り）:**
+- 1570 ETF出来高: 見かけRF 18.00 → T-1遅延補正後RF 1.94（先読みバイアス）
+- NKVI<25: 2019年以降先物が構造的バックワーデーション→閾値が永久に満たされ無意味
+- OI↑1日: 案Cで+3.08改善だが、Pine検証でデータ期間不足(118trades, 86%減)→信頼性不足
 
-**学術検証:** → research/academic_validation_JP.md
-CTAスマイル(★★★), VRP/GVZ(★★☆), SKEW>140(★☆☆新規), RY>1.5%(★★☆), FOMC除外(★☆☆新規), 建玉+GVZ(★★★), フィルター非対称性(★★☆)
+**RSI極値フィルター検証（2026/4/6）:**
+- v6: 10パターン全て同一結果（効果ゼロ。多層AND条件が構造的に極値を排除）
+- 案C: 最良（RSI<65ロングのみ）+2.5%、誤差範囲→追加不要
+
+**商品間非対称性:** GVZ→Gold専用, VIXレベル→N225専用, 同指標が逆方向に効く
 
 ---
 
-## 教訓（v8追加分 #34-41）
+## 教訓（v9追加分 #34-42）
 
 過去の教訓#1-33は確立済み — 必要時はv7またはGit履歴を参照。
 
@@ -109,35 +114,72 @@ CTAスマイル(★★★), VRP/GVZ(★★☆), SKEW>140(★☆☆新規), RY>1.
 39. ゴールドはロングのみが最良。ショートトレンドは弱く短い
 40. EWMAC速度はbarbell最良: 最速(8,32)+最遅(64,256)。中間不要
 41. GVZ_z>0は7年超年別一貫性テスト合格。全8年+, LOYO全✓, データ延長でRF改善(過適合の逆)
+42. 多層フィルターシステム(v6/案C)は指標極値を構造的に排除する。RSI極値フィルター等の追加は冗長（v6: 10パターン全同一、案C: 最良+2.5%で誤差範囲）
 
 ---
 
 ## 口座・商品情報
 
-口座: IBKR Japan U14203671 | 純資産: 200万に増資予定（現在約92万）
-商品: NK225MC(×10, 証拠金約2.5-3万/枚) | Gold MGC/GC(IBKR Japan取引可否要確認)
-合算DD: 85.9万/200万=43.0%, /300万=28.6%
-
----
-
-## 未テスト・将来の検討事項
-
-**優先度高:** 口座増資判断 / Gold MGC取引可否確認 / Gold EWMAC本番Python / IBKR API Phase 5-8
-**優先度中:** USD/JPY次トレンド時に再開
-**優先度低:** CUSUM変化点 / ICJ / VVIX比率
-**構造的課題:** 合算DD 43%(200万) → Gold追加で3商品DD分散改善見込み
+口座: IBKR Japan U14203671 | 純資産: 300万（2026/4増資済み）
+商品: NK225MC(×10, 証拠金約2.5-3万/枚) | MGC(COMEX, IBKR Japan取引可確認済み, 証拠金~$2,000-2,500/枚)
+3システム同時稼働: 300万口座でv6 Max5 + 案C 2枚 + Gold Max2で証拠金・DD許容範囲内
 
 ---
 
 ## 自動売買パイプライン
 
 - Phase 0-4: ✅完了（HW→IB Gateway→データ→シグナルエンジン v6一致率92.4%）
-- Phase 5-6: 未着手（発注エンジン・監視, ブラケットオーダー, 通知）
-- Phase 7: ペーパートレード（1-2週間, Pine並行）
-- Phase 8: ライブ（1枚固定→VT20 Max5）
+- Phase 5-6: ✅完了（ブラケット発注, Telegram通知, 3エンジン同時起動）
+- Phase 7: 🔄ペーパートレード中（3エンジンペーパー口座稼働中）
+- Phase 8: 未着手（ライブ稼働）
 
-**IBKR API:** Gateway port 4001 / N225MC=OSE.JPN / N225M=OSE.JPN / マイクロは2025/12上場
-miniPC: Getorli Ryzen 5300U/16GB/Win11Pro, Tailscale 100.97.76.83
+---
+
+## インフラ構成（確定）
+
+### miniPC
+- Getorli AMD Ryzen 5300U / 16GB / Win11 Pro
+- Tailscale: 100.97.76.83
+- Parsec: Mac/WS07からリモート操作
+
+### IB Gateway
+- IB Gateway Offline v1037 + IBC 3.23.0
+- ペーパー: port 4002 | ライブ: port 4001
+
+### IBC設定（C:\Users\Riku\Documents\IBC\config.ini）
+- AutoRestartTime=06:30（日経空白時間06:00-08:45内）
+- AcceptIncomingConnectionAction=accept
+- ReloginAfterSecondFactorAuthenticationTimeout=yes
+- CommandServerPort=7462
+
+### Gateway UI
+- Auto Restart = 7:00 AM（IBCの保険。通常はIBCが06:30に先行）
+
+### BIOS設定
+- Restore AC Power Loss = Power On（停電復旧時に自動起動）
+- Lan Wake Up From FCH = S3/S4/S5 Support
+- MAC: 68-1D-EF-5E-B5-4B（WoL用）
+
+### 週次運用
+- 毎週月曜朝: 手動2FAログイン必須（IBKR週次トークン失効: 日曜ET 1:00AM）
+- IBC AutoRestart(06:30)がTelegram通知を送信→スマホで2FA承認
+
+### 稼働エンジン（C:\Users\Riku\Desktop\tv_data\）
+| エンジン | clientId | ファイル |
+|---|---|---|
+| v6 N225 | 10 | v6_realtime_engine.py |
+| 案C N225 | 20 | caseC_realtime_engine.py |
+| Gold EWMAC | 3 | gold_ewmac_engine.py |
+
+- 全エンジンにTelegram通知実装済み（telegram_notify.py, SSL検証無効化）
+- start_trading.bat: IBC→60s待機→v6→5s→案C→5s→Gold、shell:startup登録済み
+- Windowsスリープ無効化済み
+
+### 未購入・未実施
+- UPS: CyberPower CP550JP推奨（未購入）
+- モバイルホットスポット予備回線（未実施）
+- SwitchBotプラグミニ: 外部からのminiPC起動用（未購入）
+- Telegram双方向コマンド（/status, /flatten等）: ライブ移行前に実装予定
 
 ---
 
@@ -145,4 +187,21 @@ miniPC: Getorli Ryzen 5300U/16GB/Win11Pro, Tailscale 100.97.76.83
 
 N225: 約100パターン（エントリー90+ / ポジションサイジング13）
 Gold EWMAC: 約4,500+パターン（TF×速度2500 / 時間帯510 / イベント224 / マクロ200+ / VT13 / 代替シグナル28 / 年別検証50）
-**総計: 約4,650パターン**
+N225追加フィルター: OI/NKVI/ETF/RSI極値 約50パターン（全見送り）
+**総計: 約4,700パターン**
+
+---
+
+## v8→v9 変更履歴（2026/4/6）
+
+- Phase 5-6完了を反映（3エンジンペーパー稼働中）
+- 口座: 92万→300万に増資反映
+- MGC取引可確認済み（COMEX, IBKR Japan）
+- Gold EWMAC VT20% Max2（300万口座ベース）
+- IBC設定詳細追加（AutoRestartTime=06:30他）
+- BIOS/WoL設定追加
+- 週次2FAルーティン追加
+- インフラ構成セクション新設（port, clientId, ファイルパス等を集約）
+- N225追加フィルター分析結果追加（OI/NKVI/ETF/RSI極値、全見送り）
+- 教訓#42追加（多層フィルターの極値排除冗長性）
+- テスト総計更新（4,650→4,700）

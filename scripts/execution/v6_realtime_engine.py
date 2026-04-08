@@ -422,10 +422,6 @@ class V6RealtimeEngine:
         self.streaming_bars = None
         self._needs_reconnect = False
         self.tg = TelegramNotifier()
-        self._last_bar_time = datetime.now()
-        self._error_1100_received = False
-        self._health_sent_date = None
-        self._needs_resubscribe = False
 
         self.log.info("=== v6 リアルタイムエンジン起動 ===")
         self.log.info(f"モード: {'ライブ' if is_live else 'ペーパー'} (port {self.port})")
@@ -453,7 +449,6 @@ class V6RealtimeEngine:
                 self.state['position'] = int(p.position)
 
         self.ib.disconnectedEvent += lambda: self._on_disconnect()
-        self.ib.errorEvent += self._on_error
 
     def _on_disconnect(self):
         self.log.warning("=" * 50)
@@ -462,55 +457,6 @@ class V6RealtimeEngine:
         self.log.warning("=" * 50)
         # フラグを立ててメインループに再接続を委譲
         self._needs_reconnect = True
-
-    def _on_error(self, reqId, errorCode, errorString, contract):
-        if errorCode == 10182:
-            self.log.error(f"Error 10182: {errorString} (ストリーミング死亡)")
-            self.tg.error("v6 N225", f"Error 10182: 再購読予約")
-            self._needs_resubscribe = True
-        elif errorCode == 1100:
-            self.log.warning(f"Error 1100: 接続断 - {errorString}")
-            self._error_1100_received = True
-        elif errorCode == 1102:
-            self.log.warning(f"Error 1102: 接続復旧 - {errorString}")
-            if self._error_1100_received:
-                self._error_1100_received = False
-                self.log.info("1102受信: 再購読予約")
-                self._needs_resubscribe = True
-
-    def _resubscribe_streaming(self):
-        try:
-            if self.streaming_bars is not None:
-                try:
-                    self.ib.cancelHistoricalData(self.streaming_bars)
-                    self.log.info("既存ストリーミングをキャンセル")
-                except Exception as e:
-                    self.log.warning(f"cancelHistoricalData失敗(無視): {e}")
-            self._subscribe_bars()
-            self._last_bar_time = datetime.now()
-            self.log.info("ストリーミング再購読完了")
-            self.tg.send("v6 N225 ストリーミング再購読OK")
-        except Exception as e:
-            self.log.error(f"再購読失敗: {e}")
-            self.tg.error("v6 N225", f"再購読失敗: {e}")
-            self._needs_reconnect = True
-
-    def _is_trading_hours_n225(self):
-        """N225マイクロ: 6:00-8:45 JST は休止"""
-        now = datetime.now()
-        h, m = now.hour, now.minute
-        if h == 6: return False
-        if h == 7: return False
-        if h == 8 and m < 45: return False
-        return True
-
-    def _check_watchdog(self):
-        """3時間(1Hバー x 3)バー無し → 取引時間内なら再購読"""
-        elapsed = (datetime.now() - self._last_bar_time).total_seconds()
-        if elapsed > 3 * 3600 and self._is_trading_hours_n225():
-            self.log.warning(f"ウォッチドッグ: {elapsed/3600:.1f}時間バー無し -> 再購読")
-            self.tg.warn("v6 N225", f"ウォッチドッグ発動: {elapsed/3600:.1f}h バー無し")
-            self._resubscribe_streaming()
 
     def _reconnect(self):
         """メインループから呼ばれる再接続処理"""
@@ -531,9 +477,8 @@ class V6RealtimeEngine:
                 self.log.info(f"再接続成功! (試行#{attempt})")
                 self.tg.send("v6 N225 再接続OK")
 
-                # disconnectedEvent/errorEvent再登録
+                # disconnectedEvent再登録
                 self.ib.disconnectedEvent += lambda: self._on_disconnect()
-                self.ib.errorEvent += self._on_error
 
                 # コントラクト再取得
                 self.contract = Future(
@@ -570,14 +515,8 @@ class V6RealtimeEngine:
                     self.daily_filter.update(self.indicators.bars)
                     self.log.info(f"歴史データ復元: {self.indicators.n}バー")
 
-                # バー購読再開（既存をキャンセルしてから）
-                if self.streaming_bars is not None:
-                    try: self.ib.cancelHistoricalData(self.streaming_bars)
-                    except: pass
+                # バー購読再開
                 self._subscribe_bars()
-                self._last_bar_time = datetime.now()
-                self._error_1100_received = False
-                self._needs_resubscribe = False
                 self.log.info("再接続完了 — 通常運用に復帰")
                 return  # 成功
 
@@ -640,7 +579,6 @@ class V6RealtimeEngine:
     def _on_bar_update(self, bars, hasNewBar):
         if not hasNewBar:
             return
-        self._last_bar_time = datetime.now()
         bar = bars[-2]
         bar_dict = {
             'time': bar.date,
@@ -764,19 +702,6 @@ class V6RealtimeEngine:
             while True:
                 try:
                     self.ib.sleep(1)
-                    if self._needs_resubscribe:
-                        self._needs_resubscribe = False
-                        time.sleep(5)
-                        self._resubscribe_streaming()
-                    self._check_watchdog()
-                    now = datetime.now()
-                    if now.hour == 9 and self._health_sent_date != now.date():
-                        self._health_sent_date = now.date()
-                        last_bar_str = self._last_bar_time.strftime('%H:%M')
-                        sig, st = self.indicators.evaluate_signal(-1) if self.indicators._computed else (None, {})
-                        fc_str = f"macd={st.get('macd_hist', 'N/A')}"
-                        self.tg.send(f"\u2705 v6 N225 稼働中 pos={self.state['position']} {fc_str} 最終バー={last_bar_str}")
-                        self.log.info("ヘルスチェック通知送信")
                 except (ConnectionError, OSError, asyncio.CancelledError):
                     self._needs_reconnect = True
                 if self._needs_reconnect:

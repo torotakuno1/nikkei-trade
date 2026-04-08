@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Gold EWMAC Engine v3.1 - Telegram通知付き
 ==========================================
@@ -153,11 +153,6 @@ class GoldEWMACRealtimeEngine:
         self.gvz = GVZFilter(CONFIG['fred_api_key'], CONFIG['gvz_lookback'], CONFIG['gvz_zscore_threshold'])
         self.tg = TelegramNotifier()
         self._needs_reconnect = False; self._pending = None
-        self._last_bar_time = datetime.now()
-        self._error_1100_received = False
-        self.live = None
-        self._health_sent_date = None
-        self._needs_resubscribe = False
 
     def connect(self):
         mode = 'LIVE' if self.is_live else 'Paper'
@@ -182,8 +177,6 @@ class GoldEWMACRealtimeEngine:
         self.live = self.ib.reqHistoricalData(self.contract, endDateTime='', durationStr='2 D',
             barSizeSetting=CONFIG['bar_size'], whatToShow='TRADES', useRTH=False, formatDate=1, keepUpToDate=True)
         self.live.updateEvent += self._on_bar; self.ib.disconnectedEvent += self._on_disc
-        self.ib.errorEvent += self._on_error
-        self._last_bar_time = datetime.now()
         gvz_str = f"GVZ={self.gvz.gvz_value:.1f} z={self.gvz.gvz_zscore:+.2f}" if self.gvz.gvz_value else "GVZ=N/A"
         startup_msg = f"{mode} port:{self.port}\nfc={self.ewmac.current_forecast:+.2f} pos={self.state['position']}\n{gvz_str} ATR={self.ewmac.current_atr:.1f}"
         log.info("=" * 50); log.info("監視開始"); log.info(f"  {startup_msg}"); log.info("=" * 50)
@@ -204,7 +197,6 @@ class GoldEWMACRealtimeEngine:
 
     def _on_bar(self, bars, has_new):
         if not has_new: return
-        self._last_bar_time = datetime.now()
         b = bars[-1]; bt = b.date if isinstance(b.date, datetime) else pd.to_datetime(str(b.date))
         if self._pending is None:
             self._pending = b; log.info(f"1H(1/2): {bt} C={b.close:.1f}"); return
@@ -270,61 +262,12 @@ class GoldEWMACRealtimeEngine:
         log.info(f"  保護STP: SELL {position_size}枚 @ {sl_price:.2f} (ATR={atr:.2f} x{CONFIG['protective_atr_mult']})")
         self.state['stp_order_id'] = trade.order.orderId; save_state(self.state, CONFIG['state_file'])
 
-    def _on_error(self, reqId, errorCode, errorString, contract):
-        if errorCode == 10182:
-            log.error(f"Error 10182: {errorString} (ストリーミング死亡)")
-            self.tg.error("Gold EWMAC", f"Error 10182: 再購読予約")
-            self._needs_resubscribe = True
-        elif errorCode == 1100:
-            log.warning(f"Error 1100: 接続断 - {errorString}")
-            self._error_1100_received = True
-        elif errorCode == 1102:
-            log.warning(f"Error 1102: 接続復旧 - {errorString}")
-            if self._error_1100_received:
-                self._error_1100_received = False
-                log.info("1102受信: 再購読予約")
-                self._needs_resubscribe = True
-
-    def _resubscribe_streaming(self):
-        try:
-            if self.live is not None:
-                try:
-                    self.ib.cancelHistoricalData(self.live)
-                    log.info("既存ストリーミングをキャンセル")
-                except Exception as e:
-                    log.warning(f"cancelHistoricalData失敗(無視): {e}")
-            self.live = self.ib.reqHistoricalData(self.contract, endDateTime='', durationStr='2 D',
-                barSizeSetting=CONFIG['bar_size'], whatToShow='TRADES', useRTH=False, formatDate=1, keepUpToDate=True)
-            self.live.updateEvent += self._on_bar
-            self._last_bar_time = datetime.now()
-            self._pending = None
-            log.info("ストリーミング再購読完了")
-            self.tg.send("Gold EWMAC ストリーミング再購読OK")
-        except Exception as e:
-            log.error(f"再購読失敗: {e}")
-            self.tg.error("Gold EWMAC", f"再購読失敗: {e}")
-            self._needs_reconnect = True
-
-    def _is_trading_hours_gold(self):
-        """CME Globex金: 7:00-8:00 JST は日次休止"""
-        h = datetime.now().hour
-        return h != 7
-
-    def _check_watchdog(self):
-        """6時間(2Hバー x 3)バー無し → 取引時間内なら再購読"""
-        elapsed = (datetime.now() - self._last_bar_time).total_seconds()
-        if elapsed > 6 * 3600 and self._is_trading_hours_gold():
-            log.warning(f"ウォッチドッグ: {elapsed/3600:.1f}時間バー無し -> 再購読")
-            self.tg.warn("Gold EWMAC", f"ウォッチドッグ発動: {elapsed/3600:.1f}h バー無し")
-            self._resubscribe_streaming()
-
     def _on_disc(self):
         log.warning("=" * 50); log.warning("切断!"); log.warning("=" * 50)
         self.tg.warn("Gold EWMAC", "IB Gateway切断")
         self._needs_reconnect = True
 
     def _reconn(self):
-        self._needs_reconnect = False
         try:
             try: self.ib.disconnect()
             except: pass
@@ -336,19 +279,12 @@ class GoldEWMACRealtimeEngine:
             bars = self.ib.reqHistoricalData(self.contract, endDateTime='', durationStr=CONFIG['history_duration'],
                 barSizeSetting=CONFIG['bar_size'], whatToShow='TRADES', useRTH=False, formatDate=1, keepUpToDate=False)
             if bars: self.ewmac = EWMACEngine(CONFIG); self.ewmac.initialize(bars)
-            if self.live is not None:
-                try: self.ib.cancelHistoricalData(self.live)
-                except: pass
             self.live = self.ib.reqHistoricalData(self.contract, endDateTime='', durationStr='2 D',
                 barSizeSetting=CONFIG['bar_size'], whatToShow='TRADES', useRTH=False, formatDate=1, keepUpToDate=True)
             self.live.updateEvent += self._on_bar; self.ib.disconnectedEvent += self._on_disc
-            self.ib.errorEvent += self._on_error
-            self._needs_reconnect = False; self._pending = None
-            self._last_bar_time = datetime.now(); self._error_1100_received = False
-            self._needs_resubscribe = False
-            log.info("復元完了"); return True
+            self._needs_reconnect = False; self._pending = None; log.info("復元完了"); return True
         except Exception as e:
-            log.error(f"再接続失敗: {e}"); self.tg.error("Gold EWMAC", f"再接続失敗: {e}"); self._needs_reconnect = True; return False
+            log.error(f"再接続失敗: {e}"); self.tg.error("Gold EWMAC", f"再接続失敗: {e}"); return False
 
     def run(self):
         w = 10
@@ -359,17 +295,6 @@ class GoldEWMACRealtimeEngine:
                     if self._reconn(): w = 10
                     else: w = min(w * 2, 300); continue
                 self.ib.sleep(1)
-                if self._needs_resubscribe:
-                    self._needs_resubscribe = False
-                    time.sleep(5)
-                    self._resubscribe_streaming()
-                self._check_watchdog()
-                now = datetime.now()
-                if now.hour == 9 and self._health_sent_date != now.date():
-                    self._health_sent_date = now.date()
-                    last_bar_str = self._last_bar_time.strftime('%H:%M')
-                    self.tg.send(f"\u2705 Gold EWMAC 稼働中 pos={self.state['position']} fc={self.ewmac.current_forecast:+.2f} 最終バー={last_bar_str}")
-                    log.info("ヘルスチェック通知送信")
             except KeyboardInterrupt: log.info("停止"); self.tg.send("Gold EWMAC 停止"); break
             except Exception as e: log.error(f"Error: {e}"); self.tg.error("Gold EWMAC", f"Error: {e}"); self._needs_reconnect = True
 
