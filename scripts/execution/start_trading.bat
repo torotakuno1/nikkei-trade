@@ -29,4 +29,9 @@ timeout /t 5 /nobreak
 echo [%date% %time%] Starting Gold EWMAC engine >> C:\Users\Riku\Desktop\tv_data\startup.log
 start "Gold EWMAC" cmd /k "cd /d C:\Users\Riku\Desktop\tv_data && python gold_ewmac_engine.py"
 
+REM --- 6. N225ミニ 2H フェードエンジン ---
+timeout /t 5 /nobreak
+echo [%date% %time%] Starting Fade 2H engine >> C:\Users\Riku\Desktop\tv_data\startup.log
+start "Fade 2H" cmd /k "cd /d C:\Users\CH07\nikkei-trade\scripts\execution && python fade_2h_engine.py"
+
 echo [%date% %time%] All started >> C:\Users\Riku\Desktop\tv_data\startup.log
