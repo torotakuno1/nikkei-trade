@@ -407,3 +407,42 @@ OHLCV出来高の方向予測力がゼロだったが、これは真のOFI（板
 - orb5_filter_v2.py(保守), orb5_filter_v3.py(中立)
 - strategy_screening.py, volume_analysis.py
 - 石原順: ishihara_backtest_local.py, ishihara_backtest_v2.py, ishihara_sigma_sweep.py
+
+## v16→v17 変更履歴（2026/4/14）
+
+### 日中戦略スクリーニング — 全滅確定
+- 石原順ボラティリティモデル: 48パターン全てRF<0
+- CO-OC反転: 4バリアント全てPF≒1.0（RF最良0.15）
+- ORB+NR7: コストなしRF=13.52 → 中立コスト(entry5pt/stop5pt/手数料76円)でRF=-1.00
+- 6戦略一括(MACD/RSI/TTM/ORB15/ORB30/日中モメンタム): 中立コスト全滅
+- 出来高方向予測: 42-43%（ランダム以下）
+- **結論: N225マイクロのティック値(50円)/手数料(76円)=0.7:1。日中高頻度は構造的に不成立**
+
+### OFI（Order Flow Imbalance）調査 — 棄却
+- J-Quants DataCube先物歩み値(ティック)カラム確認: 売買区分なし。約定データのみ（Trade_Date/Time/Trade_Price/Price_Type/Trade_Volume/No/Contract_Month + sco_category）
+- N225mini 2025年11月データ（335万行/18営業日）でTick Rule OFIプロトタイプ検証
+- 結果: 全タイムフレーム（1分/2分/3分/5分/15分/1H）で予測一致率≒50%。予測相関≒0。方向予測力ゼロ
+- 強OFI(|z|>1): 52.3%、極強OFI(|z|>1.5): 45.8%（逆方向）
+- 同時一致率は76-77%で安定 → OFIは後追い指標（同一バー内で価格に織り込み済み）
+- au kabucom(三菱UFJ eスマート証券)板データAPI調査: 口座無料だがOFI死亡のため口座開設不要と判断
+- **結論: Tick Rule OFI × 分足以上 × 方向フィルターは構造的に不成立。板データ真OFIもms単位の執行最適化用であり、1H足フィルターには使えない**
+
+### スクリプト（WS07: C:\Users\CH07\Desktop\jquants_data\）
+- co_oc_reversal_backtest.py, orb_nr7_backtest.py, orb_wfa.py
+- orb5_filter_v2.py(保守), orb5_filter_v3.py(中立)
+- strategy_screening.py, volume_analysis.py
+- ofi_prototype.py（Tick Rule OFI検証）
+
+### 教訓
+
+68. **N225マイクロの日中高頻度戦略はコスト構造上不成立。** ティック値(50円)/手数料(76円)=比率0.7:1。ORB(中立コストRF=-1.00)、MACD、RSI、TTM等すべて中立コストで全滅。有効戦略は1H足以上の低頻度に限定。比較: ES(1tick=$12.50/手数料$2.25=5.6:1)。
+
+69. **Pythonバックテストではエントリーを常にopen[i+1]で計算すべき。** PineのデフォルトはバーN条件成立→バーN+1始値で約定。Pythonでclose[i]エントリーとすると未来参照（look-ahead bias）となり成績を過大評価する。ORBでPython RF=13.52 vs Pine RF=3.00（4.5倍乖離）の主因の一つ。中立コストモデル（entry5pt/stop5pt/手数料76円RT）と合わせてPythonバックテストの標準とすること。
+
+70. **CO-OC反転はN225で構造的に機能しない。** ナイトセッションがオーバーナイトリターンを先取りしている。学術論文のSR4.0超は米国指数（ナイトセッションなし）の結果。N225ではCO-OC裸RF=0.15。fade_2hのエッジはCO-OC反転ではなくMACD+KVOの指標組み合わせが独自に構成（CO-OC RF=0.15 vs fade_2h RF=6.05）。
+
+71. **Tick Rule OFIはN225miniで方向予測力ゼロ。** 1分～1H全タイムフレームで予測一致率≒50%（N=335万ティック、2025年11月）。同時一致率77%は「OFIが既に起きた値動きを測っている」だけの後追い指標。OFIの予測力はミリ秒～秒の世界に限定され、分～時間では消失する。1H足フィルターとしてのOFI活用は構造的に不成立。
+
+72. **OFIで「方向予測力ゼロ」はデータ品質の問題ではなくN225miniの効率性の問題。** 流動性が十分な市場では注文流情報が同一バー内でリアルタイムに価格反映される。板データ（真のOFI）でもms単位の執行最適化には使えるが、分足以上の方向フィルターとしては構造的に効かない見通し。プロのOFI活用は「方向予測」ではなく「気配値調整・在庫管理・スプレッド制御」。
+
+73. **個人自動売買の有効時間足は1H以上。** v6(1H/RF12.23)、案C(1H/RF8.77)、Gold EWMAC(2H/RF17.14)、Fade 2H(実質数日/RF6.05)は全て1H以上で機能。5分ORB(RF-1.00)、1分MACD(RF-1.00)、15分RSI(RF-0.92)、ティックOFI(予測力ゼロ)は全て1H未満で全滅。境界線は明確で、高頻度はコスト比率と情報即時反映の両方に殺される。
