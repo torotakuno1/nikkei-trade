@@ -278,6 +278,142 @@ def fetch_pcr(ib: IB, symbol: str) -> dict:
 
 
 # ============================================================
+# IBKR: Implied Move 取得（全銘柄）
+# ============================================================
+def fetch_implied_move(ib: IB, symbol: str) -> dict:
+    """
+    ATMストラドル価格からImplied Moveを算出。
+    IM% = (ATM Call Mid + ATM Put Mid) / Stock Price × 100
+
+    Returns:
+        {'im_pct': float, 'straddle': float, 'stock_price': float,
+         'expiry': str, 'atm_strike': float} or None
+    """
+    try:
+        # 1. 原資産価格
+        stock = Stock(symbol, 'SMART', 'USD')
+        ib.qualifyContracts(stock)
+        ticker = ib.reqMktData(stock, '', snapshot=False)
+
+        price = None
+        for i in range(30):
+            ib.sleep(0.5)
+            p = ticker.marketPrice()
+            if p is not None and p == p and p > 0:
+                price = p
+                break
+            for field in ['last', 'close']:
+                v = getattr(ticker, field, None)
+                if v is not None and isinstance(v, (int, float)) and v == v and v > 0:
+                    price = v
+                    break
+            if price:
+                break
+        ib.cancelMktData(stock)
+
+        if price is None or price <= 0:
+            log.warning(f"  {symbol} IM: 原資産価格取得失敗")
+            return None
+
+        # 2. オプションチェーン定義
+        chains = ib.reqSecDefOptParams(symbol, '', stock.secType, stock.conId)
+        if not chains:
+            log.warning(f"  {symbol} IM: チェーン定義なし")
+            return None
+
+        chain = None
+        for c in chains:
+            if c.exchange == 'SMART':
+                chain = c
+                break
+        if chain is None:
+            chain = chains[0]
+
+        # 3. 最短満期（今日以降）
+        today_str = date.today().strftime('%Y%m%d')
+        valid_expiries = sorted([e for e in chain.expirations if e >= today_str])
+        if not valid_expiries:
+            log.warning(f"  {symbol} IM: 有効な満期なし")
+            return None
+
+        target_expiry = valid_expiries[0]
+        if target_expiry == today_str and len(valid_expiries) > 1:
+            target_expiry = valid_expiries[1]
+
+        # 4. ATMストライク
+        all_strikes = sorted(chain.strikes)
+        atm_strike = min(all_strikes, key=lambda s: abs(s - price))
+
+        # 5. ATM Call + Put を取得
+        call_opt = Option(symbol, target_expiry, atm_strike, 'C', 'SMART')
+        put_opt = Option(symbol, target_expiry, atm_strike, 'P', 'SMART')
+        ib.qualifyContracts(call_opt, put_opt)
+
+        if not call_opt.conId or not put_opt.conId:
+            log.warning(f"  {symbol} IM: ATMオプション認証失敗")
+            return None
+
+        call_tk = ib.reqMktData(call_opt, '', snapshot=False)
+        put_tk = ib.reqMktData(put_opt, '', snapshot=False)
+
+        # ポーリング: bid/ask か last が来るまで待つ
+        call_mid = None
+        put_mid = None
+        for i in range(30):
+            ib.sleep(0.5)
+            # Call
+            if call_mid is None:
+                bid, ask = call_tk.bid, call_tk.ask
+                if (bid is not None and isinstance(bid, (int, float)) and bid == bid and bid > 0
+                    and ask is not None and isinstance(ask, (int, float)) and ask == ask and ask > 0):
+                    call_mid = (bid + ask) / 2
+                else:
+                    last = call_tk.last
+                    if last is not None and isinstance(last, (int, float)) and last == last and last > 0:
+                        call_mid = last
+            # Put
+            if put_mid is None:
+                bid, ask = put_tk.bid, put_tk.ask
+                if (bid is not None and isinstance(bid, (int, float)) and bid == bid and bid > 0
+                    and ask is not None and isinstance(ask, (int, float)) and ask == ask and ask > 0):
+                    put_mid = (bid + ask) / 2
+                else:
+                    last = put_tk.last
+                    if last is not None and isinstance(last, (int, float)) and last == last and last > 0:
+                        put_mid = last
+            if call_mid and put_mid:
+                break
+
+        ib.cancelMktData(call_opt)
+        ib.cancelMktData(put_opt)
+
+        if call_mid is None or put_mid is None:
+            log.warning(f"  {symbol} IM: ATMオプション価格取得失敗 (call={call_mid}, put={put_mid})")
+            return None
+
+        straddle = call_mid + put_mid
+        im_pct = (straddle / price) * 100
+
+        log.info(
+            f"  {symbol} IM: ±{im_pct:.1f}% "
+            f"(straddle ${straddle:.2f}, ATM {atm_strike}, exp {target_expiry})"
+        )
+
+        return {
+            'im_pct': round(im_pct, 1),
+            'straddle': round(straddle, 2),
+            'stock_price': round(price, 2),
+            'atm_strike': atm_strike,
+            'expiry': target_expiry,
+            'range_low': round(price - straddle, 2),
+            'range_high': round(price + straddle, 2),
+        }
+    except Exception as e:
+        log.error(f"  {symbol} IM取得エラー: {e}")
+        return None
+
+
+# ============================================================
 # IBKR: 25d Risk Reversal 取得（★★★のみ）
 # ============================================================
 def fetch_risk_reversal(ib: IB, symbol: str) -> dict:
@@ -494,7 +630,7 @@ def rr_label(rr: float) -> str:
 def format_message(earnings: list, results: dict) -> str:
     """
     earnings: get_earnings_symbols() の戻り値
-    results: {symbol: {'pcr': dict, 'rr': dict}} の辞書
+    results: {symbol: {'pcr': dict, 'rr': dict, 'im': dict}} の辞書
 
     Returns: Markdown形式テキスト
     """
@@ -522,6 +658,7 @@ def format_message(earnings: list, results: dict) -> str:
             data = results.get(sym, {})
             pcr = data.get('pcr')
             rr = data.get('rr')
+            im = data.get('im')
 
             lines.append(f"*{stars} {sym}*")
 
@@ -538,6 +675,18 @@ def format_message(earnings: list, results: dict) -> str:
                 lines.append(line)
             else:
                 lines.append("  PCR: 取得失敗")
+
+            # Implied Move (全銘柄)
+            if im:
+                lines.append(
+                    f"  ⚡ Implied Move: ±{im['im_pct']:.1f}% "
+                    f"(${im['straddle']:.2f})"
+                )
+                lines.append(
+                    f"  想定レンジ: ${im['range_low']:,.2f}〜${im['range_high']:,.2f}"
+                )
+            else:
+                lines.append("  ⚡ Implied Move: 取得失敗")
 
             # RR (★★★のみ)
             if tier >= 3 and rr:
@@ -605,8 +754,13 @@ def main():
 
         # PCR (全銘柄)
         pcr = fetch_pcr(ib, sym)
-        results[sym] = {'pcr': pcr, 'rr': None}
+        results[sym] = {'pcr': pcr, 'rr': None, 'im': None}
         time.sleep(2)  # ペーシング
+
+        # Implied Move (全銘柄)
+        im = fetch_implied_move(ib, sym)
+        results[sym]['im'] = im
+        time.sleep(2)
 
         # RR (★★★のみ)
         if tier >= 3:
