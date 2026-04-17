@@ -196,12 +196,80 @@ def get_earnings_symbols(watchlist: dict) -> list:
             'hour': hour,
             'date': ear_date,
             'session': session,
+            'eps_estimate': r.get('epsEstimate'),
+            'revenue_estimate': r.get('revenueEstimate'),
         })
 
     # tier降順 → symbol順
     result.sort(key=lambda x: (-x['tier'], x['symbol']))
     log.info(f"翌日決算銘柄: {len(result)}件 — {[r['symbol'] for r in result]}")
     return result
+
+
+# ============================================================
+# Finnhub: 過去決算実績
+# ============================================================
+def fetch_past_earnings(symbol: str) -> dict:
+    """
+    Finnhub /stock/earnings から直近4四半期の実績を取得。
+
+    Returns:
+        {'last_eps_actual': float, 'last_eps_estimate': float,
+         'last_beat_pct': float, 'beat_count': int, 'total': int,
+         'avg_beat_pct': float} or None
+    """
+    if not FINNHUB_KEY:
+        return None
+
+    url = f"https://finnhub.io/api/v1/stock/earnings?symbol={symbol}&token={FINNHUB_KEY}"
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning(f"  {symbol} 過去決算取得失敗: {e}")
+        return None
+
+    if not isinstance(data, list) or not data:
+        return None
+
+    # period降順ソート、直近4件
+    data = sorted(data, key=lambda x: x.get('period', ''), reverse=True)[:4]
+
+    beat_pcts = []
+    beats = 0
+    for e in data:
+        actual = e.get('actual')
+        estimate = e.get('estimate')
+        if actual is None or estimate is None or estimate == 0:
+            continue
+        pct = (actual - estimate) / abs(estimate) * 100
+        beat_pcts.append(pct)
+        if actual > estimate:
+            beats += 1
+
+    if not beat_pcts:
+        return None
+
+    last = data[0]
+    last_actual = last.get('actual')
+    last_estimate = last.get('estimate')
+    last_beat_pct = None
+    if last_actual is not None and last_estimate not in (None, 0):
+        last_beat_pct = round((last_actual - last_estimate) / abs(last_estimate) * 100, 1)
+
+    return {
+        'last_eps_actual': last_actual,
+        'last_eps_estimate': last_estimate,
+        'last_beat_pct': last_beat_pct,
+        'beat_count': beats,
+        'total': len(beat_pcts),
+        'avg_beat_pct': round(sum(beat_pcts) / len(beat_pcts), 1),
+    }
 
 
 # ============================================================
@@ -636,7 +704,7 @@ def format_message(earnings: list, results: dict) -> str:
     """
     today = date.today()
     tomorrow = today + timedelta(days=1)
-    header = f"📐 *決算オプション環境 {today.month}/{today.day}夜〜{tomorrow.month}/{tomorrow.day}朝*"
+    header = f"📊 *決算プレビュー {today.month}/{today.day}夜〜{tomorrow.month}/{tomorrow.day}朝*"
     lines = [header, f"対象: {len(earnings)}銘柄", ""]
 
     # セッション別グループ
@@ -659,8 +727,37 @@ def format_message(earnings: list, results: dict) -> str:
             pcr = data.get('pcr')
             rr = data.get('rr')
             im = data.get('im')
+            past = data.get('past')
 
             lines.append(f"*{stars} {sym}*")
+
+            # 株価 (IMから取得)
+            if im and im.get('stock_price'):
+                lines.append(f"  💰 ${im['stock_price']:,.2f}")
+
+            # EPS/売上予想 (Finnhubカレンダーから)
+            eps_est = e.get('eps_estimate')
+            rev_est = e.get('revenue_estimate')
+            if eps_est is not None:
+                rev_str = ""
+                if rev_est:
+                    rev_b = rev_est / 1e9
+                    rev_str = f" | 売上予想 ${rev_b:.2f}B" if rev_b >= 1 else f" | 売上予想 ${rev_est/1e6:.0f}M"
+                lines.append(f"  🎯 EPS予想: ${eps_est:.2f}{rev_str}")
+
+            # 過去実績 (Finnhub)
+            if past:
+                last_a = past.get('last_eps_actual')
+                last_e = past.get('last_eps_estimate')
+                last_bp = past.get('last_beat_pct')
+                if last_a is not None and last_e is not None and last_bp is not None:
+                    verdict = "Beat" if last_bp > 1 else ("Miss" if last_bp < -1 else "In-line")
+                    lines.append(f"  📜 前回: ${last_a:.2f} vs ${last_e:.2f} → {last_bp:+.1f}% {verdict}")
+                bc = past.get('beat_count', 0)
+                total = past.get('total', 0)
+                avg = past.get('avg_beat_pct')
+                if total > 0 and avg is not None:
+                    lines.append(f"  📊 直近{total}回: {bc}勝{total-bc}負, 平均{avg:+.1f}%")
 
             # PCR
             if pcr:
@@ -752,9 +849,14 @@ def main():
         tier = e['tier']
         log.info(f"処理中: {sym} (tier={tier})")
 
+        # 過去決算実績 (Finnhub — IB不要)
+        past = fetch_past_earnings(sym)
+        results[sym] = {'pcr': None, 'rr': None, 'im': None, 'past': past}
+        time.sleep(0.5)  # Finnhubレートリミット
+
         # PCR (全銘柄)
         pcr = fetch_pcr(ib, sym)
-        results[sym] = {'pcr': pcr, 'rr': None, 'im': None}
+        results[sym]['pcr'] = pcr
         time.sleep(2)  # ペーシング
 
         # Implied Move (全銘柄)
