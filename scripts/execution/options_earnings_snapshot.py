@@ -27,6 +27,7 @@ import csv
 import json
 import time
 import math
+import html
 import logging
 import urllib.request
 from datetime import datetime, timedelta, date
@@ -73,7 +74,7 @@ TG_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID_EARNINGS', '')
 # Telegram（EARNINGS Bot 専用）
 # ============================================================
 def send_telegram(text: str):
-    """Markdown形式でTelegram送信"""
+    """HTML形式でTelegram送信"""
     if not TG_TOKEN or not TG_CHAT_ID:
         log.info(f"[TG OFF] {text[:120]}...")
         return
@@ -85,13 +86,18 @@ def send_telegram(text: str):
         payload = json.dumps({
             'chat_id': TG_CHAT_ID,
             'text': text,
-            'parse_mode': 'Markdown',
+            'parse_mode': 'HTML',
         }).encode('utf-8')
         req = urllib.request.Request(
             url, data=payload,
             headers={'Content-Type': 'application/json'},
         )
-        urllib.request.urlopen(req, timeout=15, context=ctx)
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            body = resp.read().decode('utf-8')
+            log.info(f"Telegram送信OK: {body[:200]}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='replace')
+        log.warning(f"Telegram送信失敗: {e} — {body}")
     except Exception as e:
         log.warning(f"Telegram送信失敗: {e}")
 
@@ -184,9 +190,12 @@ def get_earnings_symbols(watchlist: dict) -> list:
         # 今日ET AMC → 今夜発表
         if ear_date == from_str and hour == 'amc':
             session = 'today_amc'
-        # 明日ET BMO/TBD → 明朝発表
-        elif ear_date == to_str and hour in ('bmo', ''):
+        # 明日ET BMO → 明朝発表
+        elif ear_date == to_str and hour == 'bmo':
             session = 'tomorrow_bmo'
+        # 明日ET 時刻未定（hour が空文字）
+        elif ear_date == to_str and hour == '':
+            session = 'tomorrow_tbd'
         else:
             continue
 
@@ -277,20 +286,19 @@ def fetch_past_earnings(symbol: str) -> dict:
 # ============================================================
 def fetch_pcr(ib: IB, symbol: str) -> dict:
     """
-    Stock の genericTickList="100,101" で集計OI/Volumeを取得。
+    Stock の genericTickList="101" でOI集計を取得。
     Tick 27: callOpenInterest, 28: putOpenInterest
-    Tick 29: callVolume, 30: putVolume
+    ※ genericTick 100 (Volume) は遅延データ非対応のため除外。
 
     Returns:
-        {'call_oi': int, 'put_oi': int, 'call_vol': int, 'put_vol': int,
-         'pcr_oi': float, 'pcr_vol': float, 'total_oi': int} or None
+        {'call_oi': int, 'put_oi': int, 'pcr_oi': float, 'total_oi': int} or None
     """
     try:
         stock = Stock(symbol, 'SMART', 'USD')
         ib.qualifyContracts(stock)
 
         # snapshot=False: genericTickList と snapshot は併用不可 (Error 321)
-        ticker = ib.reqMktData(stock, genericTickList='100,101', snapshot=False)
+        ticker = ib.reqMktData(stock, genericTickList='101', snapshot=False)
 
         # ポーリング: OIデータ到着を最大15秒待つ
         call_oi = None
@@ -306,15 +314,7 @@ def fetch_pcr(ib: IB, symbol: str) -> dict:
                 put_oi = raw_put
                 break
 
-        call_vol = getattr(ticker, 'callVolume', None)
-        put_vol = getattr(ticker, 'putVolume', None)
         ib.cancelMktData(stock)
-
-        # nan → None
-        if isinstance(call_vol, float) and math.isnan(call_vol):
-            call_vol = None
-        if isinstance(put_vol, float) and math.isnan(put_vol):
-            put_vol = None
 
         # 値の検証
         if call_oi is None or put_oi is None:
@@ -327,17 +327,10 @@ def fetch_pcr(ib: IB, symbol: str) -> dict:
         total_oi = (call_oi or 0) + (put_oi or 0)
         pcr_oi = (put_oi / call_oi) if call_oi and call_oi > 0 else None
 
-        pcr_vol = None
-        if call_vol and call_vol > 0 and put_vol is not None:
-            pcr_vol = put_vol / call_vol
-
         return {
             'call_oi': call_oi or 0,
             'put_oi': put_oi or 0,
-            'call_vol': call_vol or 0,
-            'put_vol': put_vol or 0,
             'pcr_oi': round(pcr_oi, 2) if pcr_oi is not None else None,
-            'pcr_vol': round(pcr_vol, 2) if pcr_vol is not None else None,
             'total_oi': total_oi,
         }
     except Exception as e:
@@ -700,20 +693,22 @@ def format_message(earnings: list, results: dict) -> str:
     earnings: get_earnings_symbols() の戻り値
     results: {symbol: {'pcr': dict, 'rr': dict, 'im': dict}} の辞書
 
-    Returns: Markdown形式テキスト
+    Returns: HTML形式テキスト（Telegram parse_mode='HTML'）
     """
     today = date.today()
     tomorrow = today + timedelta(days=1)
-    header = f"📊 *決算プレビュー {today.month}/{today.day}夜〜{tomorrow.month}/{tomorrow.day}朝*"
+    header = f"📊 <b>決算プレビュー {today.month}/{today.day}夜〜{tomorrow.month}/{tomorrow.day}朝</b>"
     lines = [header, f"対象: {len(earnings)}銘柄", ""]
 
     # セッション別グループ
     amc_syms = [e for e in earnings if e['session'] == 'today_amc']
     bmo_syms = [e for e in earnings if e['session'] == 'tomorrow_bmo']
+    tbd_syms = [e for e in earnings if e['session'] == 'tomorrow_tbd']
 
     for group_label, group in [
-        (f"━━━━ 🌆 今夜 AMC ━━━━", amc_syms),
-        (f"━━━━ 🌅 明朝 BMO ━━━━", bmo_syms),
+        ("━━━━ 🌆 今夜 AMC ━━━━", amc_syms),
+        ("━━━━ 🌅 明朝 BMO ━━━━", bmo_syms),
+        ("━━━━ ⏰ 明日 時刻未定 ━━━━", tbd_syms),
     ]:
         if not group:
             continue
@@ -729,7 +724,7 @@ def format_message(earnings: list, results: dict) -> str:
             im = data.get('im')
             past = data.get('past')
 
-            lines.append(f"*{stars} {sym}*")
+            lines.append(f"<b>{html.escape(stars + ' ' + sym)}</b>")
 
             # 株価 (IMから取得)
             if im and im.get('stock_price'):
@@ -743,7 +738,7 @@ def format_message(earnings: list, results: dict) -> str:
                 if rev_est:
                     rev_b = rev_est / 1e9
                     rev_str = f" | 売上予想 ${rev_b:.2f}B" if rev_b >= 1 else f" | 売上予想 ${rev_est/1e6:.0f}M"
-                lines.append(f"  🎯 EPS予想: ${eps_est:.2f}{rev_str}")
+                lines.append(f"  🎯 EPS予想: ${eps_est:.2f}{html.escape(rev_str)}")
 
             # 過去実績 (Finnhub)
             if past:
@@ -759,16 +754,13 @@ def format_message(earnings: list, results: dict) -> str:
                 if total > 0 and avg is not None:
                     lines.append(f"  📊 直近{total}回: {bc}勝{total-bc}負, 平均{avg:+.1f}%")
 
-            # PCR
+            # PCR (OIのみ — Volumeは遅延データ非対応)
             if pcr:
                 oi_str = f"{pcr['total_oi']//1000}K" if pcr['total_oi'] >= 1000 else str(pcr['total_oi'])
                 pcr_oi_lbl = pcr_label(pcr['pcr_oi'])
                 line = f"  OI {oi_str}"
                 if pcr['pcr_oi'] is not None:
-                    line += f" | PCR {pcr['pcr_oi']:.2f}({pcr_oi_lbl})"
-                if pcr['pcr_vol'] is not None:
-                    pcr_vol_lbl = pcr_label(pcr['pcr_vol'])
-                    line += f" | Vol {pcr['pcr_vol']:.2f}({pcr_vol_lbl})"
+                    line += f" | PCR(OI) {pcr['pcr_oi']:.2f}({pcr_oi_lbl})"
                 lines.append(line)
             else:
                 lines.append("  PCR: 取得失敗")
@@ -829,14 +821,22 @@ def main():
         log.info("翌日決算銘柄なし → 無通知終了")
         return
 
-    # 4. IB Gateway 接続
+    # 4. IB Gateway 接続（失敗時1回リトライ）
     ib = IB()
-    try:
-        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID, timeout=15)
-        log.info(f"IB Gateway 接続OK (port {IB_PORT}, clientId {IB_CLIENT_ID})")
-    except Exception as e:
-        log.error(f"IB Gateway 接続失敗: {e}")
-        send_telegram(f"⚠️ *Options Snapshot*\nIB Gateway接続失敗: {e}")
+    connected = False
+    for attempt in range(2):
+        try:
+            ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID, timeout=15)
+            log.info(f"IB Gateway 接続OK (port {IB_PORT}, clientId {IB_CLIENT_ID})")
+            connected = True
+            break
+        except Exception as e:
+            log.warning(f"IB Gateway 接続失敗 (attempt {attempt + 1}): {e}")
+            if attempt == 0:
+                log.info("5秒後にリトライ...")
+                time.sleep(5)
+    if not connected:
+        send_telegram(f"⚠️ <b>Options Snapshot</b>\nIB Gateway接続失敗（2回試行）")
         sys.exit(1)
 
     # 遅延データモード ($0)
