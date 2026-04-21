@@ -41,6 +41,7 @@ from ib_insync import IB, Stock, Option, util
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent  # scripts/execution/ → repo root
 WATCHLIST_PATH = REPO_ROOT / "data" / "earnings_watchlist.csv"
+PENDING_SURPRISE_PATH = SCRIPT_DIR / "logs" / "pending_surprise.json"
 
 # ============================================================
 # ロギング
@@ -879,7 +880,38 @@ def main():
     log.info(f"送信メッセージ ({len(msg)} chars)")
     send_telegram(msg)
 
+    # 8. pending_surprise.json 書き出し（サプライズチェック用）
+    write_pending_surprise(earnings, results)
+
     log.info("=== 完了 ===")
+
+
+def write_pending_surprise(earnings: list, results: dict):
+    """翌日決算銘柄リストを pending_surprise.json に書き出す。0件なら書かない。"""
+    symbols = []
+    for e in earnings:
+        sym = e['symbol']
+        im_data = results.get(sym, {}).get('im')
+        im_pct = im_data['im_pct'] if im_data else None
+        symbols.append({
+            'symbol': sym,
+            'tier': e['tier'],
+            'session': e['session'],
+            'eps_estimate': e.get('eps_estimate'),
+            'im_pct': im_pct,
+        })
+
+    if not symbols:
+        log.info("pending_surprise: 銘柄0件のため書き出しスキップ")
+        return
+
+    payload = {
+        'date': date.today().strftime('%Y-%m-%d'),
+        'symbols': symbols,
+    }
+    with open(PENDING_SURPRISE_PATH, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    log.info(f"pending_surprise.json 書き出し: {len(symbols)}銘柄 → {PENDING_SURPRISE_PATH}")
 
 
 if __name__ == '__main__':
