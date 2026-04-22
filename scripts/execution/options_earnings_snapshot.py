@@ -358,16 +358,19 @@ def fetch_implied_move(ib: IB, symbol: str) -> dict:
         ticker = ib.reqMktData(stock, '', snapshot=False)
 
         price = None
+        price_src = None
         for i in range(30):
             ib.sleep(0.5)
             p = ticker.marketPrice()
-            if p is not None and p == p and p > 0:
+            if p is not None and not math.isnan(p) and p > 0:
                 price = p
+                price_src = 'marketPrice'
                 break
             for field in ['last', 'close']:
                 v = getattr(ticker, field, None)
-                if v is not None and isinstance(v, (int, float)) and v == v and v > 0:
+                if v is not None and isinstance(v, (int, float)) and not math.isnan(v) and v > 0:
                     price = v
+                    price_src = field
                     break
             if price:
                 break
@@ -376,6 +379,8 @@ def fetch_implied_move(ib: IB, symbol: str) -> dict:
         if price is None or price <= 0:
             log.warning(f"  {symbol} IM: 原資産価格取得失敗")
             return None
+
+        log.info(f"  {symbol} IM: 原資産 ${price:.2f} (via {price_src})")
 
         # 2. オプションチェーン定義
         chains = ib.reqSecDefOptParams(symbol, '', stock.secType, stock.conId)
@@ -418,31 +423,33 @@ def fetch_implied_move(ib: IB, symbol: str) -> dict:
         call_tk = ib.reqMktData(call_opt, '', snapshot=False)
         put_tk = ib.reqMktData(put_opt, '', snapshot=False)
 
-        # ポーリング: bid/ask か last が来るまで待つ
+        def _valid(v):
+            return v is not None and isinstance(v, (int, float)) and not math.isnan(v) and v > 0
+
+        def _get_option_price(tk):
+            """bid/ask mid → close → last の順でフォールバック。(価格, ソース名) を返す。"""
+            bid, ask = tk.bid, tk.ask
+            if _valid(bid) and _valid(ask):
+                return (bid + ask) / 2, 'bid/ask mid'
+            close = tk.close
+            if _valid(close):
+                return close, 'close'
+            last = tk.last
+            if _valid(last):
+                return last, 'last'
+            return None, None
+
+        # ポーリング: bid/ask mid → close → last が来るまで最大15秒待つ
         call_mid = None
         put_mid = None
+        call_src = None
+        put_src = None
         for i in range(30):
             ib.sleep(0.5)
-            # Call
             if call_mid is None:
-                bid, ask = call_tk.bid, call_tk.ask
-                if (bid is not None and isinstance(bid, (int, float)) and bid == bid and bid > 0
-                    and ask is not None and isinstance(ask, (int, float)) and ask == ask and ask > 0):
-                    call_mid = (bid + ask) / 2
-                else:
-                    last = call_tk.last
-                    if last is not None and isinstance(last, (int, float)) and last == last and last > 0:
-                        call_mid = last
-            # Put
+                call_mid, call_src = _get_option_price(call_tk)
             if put_mid is None:
-                bid, ask = put_tk.bid, put_tk.ask
-                if (bid is not None and isinstance(bid, (int, float)) and bid == bid and bid > 0
-                    and ask is not None and isinstance(ask, (int, float)) and ask == ask and ask > 0):
-                    put_mid = (bid + ask) / 2
-                else:
-                    last = put_tk.last
-                    if last is not None and isinstance(last, (int, float)) and last == last and last > 0:
-                        put_mid = last
+                put_mid, put_src = _get_option_price(put_tk)
             if call_mid and put_mid:
                 break
 
@@ -452,6 +459,9 @@ def fetch_implied_move(ib: IB, symbol: str) -> dict:
         if call_mid is None or put_mid is None:
             log.warning(f"  {symbol} IM: ATMオプション価格取得失敗 (call={call_mid}, put={put_mid})")
             return None
+
+        log.info(f"  {symbol} Call {atm_strike}: {call_src} ${call_mid:.2f}")
+        log.info(f"  {symbol} Put {atm_strike}: {put_src} ${put_mid:.2f}")
 
         straddle = call_mid + put_mid
         im_pct = (straddle / price) * 100
@@ -502,18 +512,19 @@ def fetch_risk_reversal(ib: IB, symbol: str) -> dict:
 
         # ポーリング: 有効な価格が来るまで最大15秒待つ
         price = None
+        price_src = None
         for i in range(30):
             ib.sleep(0.5)
-            # marketPrice() は last → close → bid/ask mid の順で試行
             p = ticker.marketPrice()
-            if p is not None and p == p and p > 0:  # nan check
+            if p is not None and not math.isnan(p) and p > 0:
                 price = p
+                price_src = 'marketPrice'
                 break
-            # 個別フィールドも確認
             for field in ['last', 'close']:
                 v = getattr(ticker, field, None)
-                if v is not None and isinstance(v, (int, float)) and v == v and v > 0:
+                if v is not None and isinstance(v, (int, float)) and not math.isnan(v) and v > 0:
                     price = v
+                    price_src = field
                     break
             if price:
                 break
@@ -523,7 +534,7 @@ def fetch_risk_reversal(ib: IB, symbol: str) -> dict:
             log.warning(f"  {symbol}: 原資産価格取得失敗 ({price})")
             return None
 
-        log.info(f"  {symbol}: 原資産 ${price:.2f}")
+        log.info(f"  {symbol}: 原資産 ${price:.2f} (via {price_src})")
 
         # 2. オプションチェーン定義
         chains = ib.reqSecDefOptParams(symbol, '', stock.secType, stock.conId)
